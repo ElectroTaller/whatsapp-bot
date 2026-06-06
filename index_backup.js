@@ -6,10 +6,36 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 
-const aiGemini = require('./bot/ai_gemini.js');
-const commands = require('./bot/commands.js');
-const utils = require('./bot/utils.js');
-const genAI = aiGemini.initGemini();
+// Inicialización de Google Gemini si la clave está configurada
+const apiKeyValida = process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'tu_api_key_aqui';
+const geminiModelName = (process.env.GEMINI_MODEL || 'gemini-1.5-flash').trim().toLowerCase().replace(/\s+/g, '-');
+let genAI = null;
+let chatHistories = {};
+
+// Administradores autorizados (Soporta IDs LID o números telefónicos)
+const adminIds = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+const adminAire = (process.env.ADMIN_AIRE || '').split(',').map(id => id.trim()).filter(Boolean);
+const adminAuto = (process.env.ADMIN_AUTO || '').split(',').map(id => id.trim()).filter(Boolean);
+
+// Lista de palabras obscenas y groserías comunes para el filtro local de seguridad
+const palabrasProhibidas = [
+    'pendejo', 'pendeja', 'mierda', 'cabron', 'cabrón', 'puto', 'puta', 
+    'verga', 'hijo de puta', 'hijo de perra', 'chucha', 'coño', 'culiao', 'culiado',
+    'xopa', 'cueco', 'maricon', 'maricón', 'singao', 'malparido', 'vergazazo'
+];
+
+if (apiKeyValida) {
+    try {
+        const { GoogleGenerativeAI } = require('@google/generative-ai');
+        genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+        console.log(`🤖 IA de Google Gemini configurada y lista (Modelo: ${geminiModelName}).`);
+    } catch (e) {
+        console.error('❌ Error al inicializar Gemini:', e.message);
+    }
+} else {
+    console.warn('⚠️ No se detectó una GEMINI_API_KEY válida en el archivo .env. El bot usará el menú interactivo como fallback.');
+}
+
 const expressApp = express();
 const port = 3000;
 
@@ -265,6 +291,45 @@ expressApp.post('/sync-orders', (req, res) => {
 });
 
 // Función para normalizar texto de búsqueda de órdenes (elimina prefijos comunes, guiones y espacios)
+function normalizarTextoBusqueda(txt) {
+    if (!txt) return '';
+    return txt.toUpperCase()
+        .trim()
+        // Eliminar prefijos comunes al inicio: ORDEN DE SERVICIO, ORDEN DE TRABAJO, ORDEN, ORD, NÚMERO, NUMERO, NUM, N°, N_
+        .replace(/^(ORDEN DE SERVICIO|ORDEN DE TRABAJO|ORDEN|ORD|NÚMERO|NUMERO|NUM|N°|N_)+/g, '')
+        // Eliminar caracteres no alfanuméricos sobrantes al inicio/fin (guiones, espacios, guiones bajos residuales)
+        .replace(/^[\s\-_]+|[\s\-_]+$/g, '')
+        // Eliminar guiones, espacios y guiones bajos intermedios para comparar strings compactos
+        .replace(/[\s\-_]+/g, '');
+}
+
+// Función para obtener la descripción completa del equipo incluyendo marca y modelo (ej. para ECUs)
+function obtenerDescripcionEquipo(order) {
+    let equipo = order.deviceType || 'Equipo';
+    let extras = [];
+    
+    if (order.vehicleData) {
+        if (order.vehicleData.brand) extras.push(order.vehicleData.brand);
+        if (order.vehicleData.model) extras.push(order.vehicleData.model);
+    }
+    
+    if (order.acData) {
+        if (order.acData.brand) extras.push(order.acData.brand);
+        if (order.acData.model) extras.push(order.acData.model);
+    }
+
+    if (order.brand && !extras.includes(order.brand)) extras.push(order.brand);
+    if (order.model && !extras.includes(order.model)) extras.push(order.model);
+    
+    if (extras.length > 0) {
+        equipo += ` ${extras.join(' ')}`;
+    }
+    if (order.deviceDesc) {
+        equipo += ` (${order.deviceDesc})`;
+    }
+    return equipo.trim();
+}
+
 // 🤖 CEREBRO DEL BOT: función que registra el listener de mensajes (se llama cada vez que el cliente se crea)
 function registrarListenerMensajes(clientInstance, nombreLinea) {
     clientInstance.on('message', async msg => {
@@ -343,6 +408,21 @@ function registrarListenerMensajes(clientInstance, nombreLinea) {
 
     // ── Resolver número de teléfono real del remitente (priorizando contact.number) ───
     // Helper: formatea un número como +507XXXXXXXX (autocompletar números panameños)
+    function formatearTelefono(num) {
+        if (!num) return '';
+        const digits = num.replace(/\D/g, '');
+        // Ya tiene código de país completo (10+ dígitos incluyendo código)
+        if (digits.length >= 10) return `+${digits}`;
+        // 8 dígitos: número local panameño (6XXXXXXX o 2XXXXXXX etc.)
+        if (digits.length === 8) return `+507${digits}`;
+        // 7 dígitos: número panameño fijo antiguo
+        if (digits.length === 7) return `+507${digits}`;
+        // 9 dígitos: posiblemente ya incluye el 507 sin el +
+        if (digits.length === 9 && digits.startsWith('507')) return `+${digits}`;
+        // Cualquier otro caso, agregar + directo
+        return `+${digits}`;
+    }
+
     let contactNum = '';
     try {
         const contactRaw = await msg.getContact();
@@ -358,9 +438,104 @@ function registrarListenerMensajes(clientInstance, nombreLinea) {
     const isFromAdmin = adminIds.includes(sender) || adminIds.includes(contactNum) || adminIds.includes(msg.author || '');
 
     if (isFromAdmin) {
-        const handled = await commands.handleAdminCommands(msg, clientInstance, texto, sender, contactNum, humanTakenOver, adminIds, adminAire, adminAuto);
-        if (handled !== false) return;
+        // ── Comando: saludar NÚMERO ────────────────────────────────────────────────
+        // ── Comando: saludar NÚMERO o saluda NÚMERO ────────────────────────────────────────────────
+        const matchSaludo = texto.match(/^saludar?\s*(\+?\d+)/);
+        if (matchSaludo) {
+            let targetNumber = matchSaludo[1].replace(/\D/g, '');
+            if (targetNumber.length > 0) {
+                if (targetNumber.length === 8 || targetNumber.length === 7) targetNumber = '507' + targetNumber;
+                const targetId = `${targetNumber}@c.us`;
+                const saludoMsg = `¡Hola! 👋 Te escribimos de *ElectroTaller* (mensaje automático del bot).\nAquí te compartimos nuestra información de contacto para que puedas guardar nuestro número y realizar tus consultas de forma rápida.\n\n🕒 *Horarios:*\nLunes a Viernes de 8:00 AM - 12:00 PM y 1:00 PM - 6:00 PM\n\n📍 *Ubicación (Waze):*\nhttps://waze.com/ul/hd1x7qcpc7\n\nQuedamos a la orden para apoyarte con tus equipos.`;
+                try {
+                    await clientInstance.sendMessage(targetId, saludoMsg);
+                    return msg.reply(`✅ Saludo enviado exitosamente a ${targetNumber}`);
+                } catch (err) {
+                    return msg.reply(`❌ Error al enviar saludo a ${targetNumber}: ${err.message}`);
+                }
+            }
+        }
+
+        // ── Comando: tomar NÚMERO — pausa el bot para ese cliente ──────────────────
+        if (texto.startsWith('tomar ')) {
+            let targetNumber = texto.split(' ')[1]?.replace(/\D/g, '') || '';
+            if (targetNumber.length === 8) targetNumber = '507' + targetNumber;
+            if (targetNumber.length > 0) {
+                const targetId = `${targetNumber}@c.us`;
+                humanTakenOver[targetId] = true;
+                console.log(`🙋 [ADMIN] Toma de control activada para ${targetId}`);
+                return msg.reply(`✅ *Modo humano activado* para el cliente *${targetNumber}*.\nEl bot está en pausa para ese chat. Cuando termines, escribe:\n👉 *liberar ${targetNumber}*`);
+            }
+            return msg.reply('❌ Formato incorrecto. Usa: *tomar 5071234567*');
+        }
+
+        // ── Comando: liberar NÚMERO — reactiva el bot para ese cliente ─────────────
+        if (texto.startsWith('liberar ')) {
+            let targetNumber = texto.split(' ')[1]?.replace(/\D/g, '') || '';
+            if (targetNumber.length === 8) targetNumber = '507' + targetNumber;
+            if (targetNumber.length > 0) {
+                const targetId = `${targetNumber}@c.us`;
+                delete humanTakenOver[targetId];
+                console.log(`🤖 [ADMIN] Bot reactivado para ${targetId}`);
+                return msg.reply(`✅ *Bot reactivado* para el cliente *${targetNumber}*. ElectroBot volverá a responder automáticamente.`);
+            }
+            return msg.reply('❌ Formato incorrecto. Usa: *liberar 5071234567*');
+        }
+
+        // ── Comando: responder NÚMERO mensaje — envía mensaje al cliente con corrección ortográfica ──
+        if (texto.startsWith('responder ')) {
+            const partes = msg.body.trim().split(' ');
+            if (partes.length >= 3) {
+                let targetNumber = partes[1].replace(/\D/g, '');
+                if (targetNumber.length === 8 || targetNumber.length === 7) targetNumber = '507' + targetNumber;
+                const mensajeOriginal = partes.slice(2).join(' ');
+                if (targetNumber.length > 0 && mensajeOriginal.length > 0) {
+                    const targetId = `${targetNumber}@c.us`;
+                    let mensajeFinal = mensajeOriginal;
+
+                    // Corregir ortografía y gramática con Gemini si está disponible
+                    if (genAI) {
+                        try {
+                            const modelCorrector = genAI.getGenerativeModel({
+                                model: geminiModelName,
+                                systemInstruction: 'Eres un corrector ortográfico y gramatical de español. Tu única tarea es corregir el texto que te envíen: corrige errores de ortografía, acentos, puntuación y gramática, manteniendo el estilo casual y el tono original del autor. NO agregues saludos, NO cambies el significado, NO expliques nada. Devuelve SOLO el texto corregido.'
+                            });
+                            const resultCorrecion = await modelCorrector.generateContent(mensajeOriginal);
+                            const textoCorregido = resultCorrecion.response.text().trim();
+                            if (textoCorregido && textoCorregido.length > 0) {
+                                mensajeFinal = textoCorregido;
+                                console.log(`[CORRECTOR] Original: "${mensajeOriginal}" → Corregido: "${textoCorregido}"`);
+                            }
+                        } catch (errCorrector) {
+                            console.warn('[CORRECTOR] No se pudo corregir el mensaje, se envía el original:', errCorrector.message);
+                        }
+                    }
+
+                    try {
+                        await clientInstance.sendMessage(targetId, mensajeFinal);
+                        const notaCorreccion = mensajeFinal !== mensajeOriginal
+                            ? `\n\n_✏️ Texto corregido automáticamente por el bot._`
+                            : '';
+                        return msg.reply(`✅ Mensaje enviado a *${targetNumber}*:\n"${mensajeFinal}"${notaCorreccion}`);
+                    } catch (err) {
+                        return msg.reply(`❌ Error al enviar mensaje a ${targetNumber}: ${err.message}`);
+                    }
+                }
+            }
+            return msg.reply('❌ Formato incorrecto. Usa: *responder +50761234567 Tu mensaje aquí*');
+        }
+
+        // ── Comando: chats — lista los chats bajo control humano ──────────────────
+        if (texto === 'chats' || texto === 'activos') {
+            const activos = Object.keys(humanTakenOver);
+            if (activos.length === 0) {
+                return msg.reply('ℹ️ No hay chats bajo control humano en este momento. El bot está respondiendo a todos.');
+            }
+            const lista = activos.map(id => `• ${id.replace('@c.us', '')}`).join('\n');
+            return msg.reply(`🙋 *Chats bajo control humano (bot pausado):*\n${lista}\n\nPara reactivar el bot en uno de ellos escribe: *liberar NÚMERO*`);
+        }
     }
+
     // ── Verificar si el chat está bajo control humano (bot pausado) ────────────────
     if (humanTakenOver[sender]) {
         console.log(`[${nombreLinea}] Chat en modo humano, ignorando mensaje de ${sender}`);
@@ -368,9 +543,272 @@ function registrarListenerMensajes(clientInstance, nombreLinea) {
     }
 
     // ── Opcional: Si Gemini está activo y configurado, procesar con IA ─────────────────
-    // ── Opcional: Si Gemini está activo y configurado, procesar con IA ─────────────────
-    const iaHandled = await aiGemini.procesarMensaje(msg, clientInstance, texto, sender, contactNum, dbOrders, chatHistories, allowHumanContact, notifyAfterHours, adminIds, adminAire, adminAuto);
-    if (iaHandled) return;
+    if (genAI) {
+        try {
+            // Obtener el número de teléfono del remitente con formato +507XXXXXXXX
+            // contactNum ya fue resuelto correctamente (priorizando contact.number) al inicio del handler
+            const senderPhoneNum = formatearTelefono(contactNum);
+            console.log(`[IA] Número del remitente resuelto: ${senderPhoneNum}`);
+
+            const textoUpper = texto.toUpperCase();
+
+            // Filtrar y formatear SOLO las órdenes verificadas para inyectarlas en el contexto de la IA
+            // Las órdenes sin verificar (sin PIN ni Número de Orden) se OMITEN completamente
+            // para evitar que la IA filtre información basándose en nombres de clientes
+            const ordersVerificadas = [];
+            let ordenesSinVerificar = 0;
+
+            dbOrders.forEach(o => {
+                // Construir un solo string con todo el historial de la sesión más el mensaje actual
+                const chatCompleto = (chatHistories[sender] || []).map(m => m.parts[0].text).join(' ').toUpperCase() + ' ' + textoUpper;
+
+                // 1. Validar si el cliente proporcionó el PIN/Cédula en el chat
+                let pinMatch = false;
+                if (o.securityPin) {
+                    const dbPin = o.securityPin.toUpperCase().trim();
+                    if (dbPin && chatCompleto.includes(dbPin)) {
+                        pinMatch = true;
+                    }
+                }
+
+                // 2. Validar si el cliente proporcionó el Número de Orden en el chat
+                let idMatch = false;
+                if (o.id) {
+                    const idDigits = o.id.replace(/\D/g, '');
+                    if (idDigits.length >= 2 && chatCompleto.includes(idDigits)) {
+                        idMatch = true;
+                    }
+                    if (chatCompleto.includes(o.id.toUpperCase())) {
+                        idMatch = true;
+                    }
+                }
+
+                if (pinMatch || idMatch) {
+                    // Acceso Total: proporcionó PIN o ID de orden — mostrar datos completos
+                    const pinStr = o.securityPin ? o.securityPin : 'No registrado';
+                    const descCompleta = obtenerDescripcionEquipo(o);
+                    const saldo = (Number(o.budget) || 0) - (Number(o.downPayment) || 0);
+                    ordersVerificadas.push(`- ID: ${o.id}, Cliente: ${o.clientName}, PIN: ${pinStr}, Equipo: ${descCompleta}, Estado: ${o.status}, Presupuesto: $${o.budget || 0}, Anticipo: $${o.downPayment || 0}, Saldo Pendiente: $${saldo}`);
+                } else {
+                    // Sin verificar: NO incluir en el contexto (ni nombre, ni equipo, nada)
+                    ordenesSinVerificar++;
+                }
+            });
+
+            // Construir el contexto final: solo órdenes verificadas + conteo anónimo de las demás
+            let ordersContext = '';
+            if (ordersVerificadas.length > 0) {
+                ordersContext = ordersVerificadas.join('\n');
+            }
+            if (ordenesSinVerificar > 0) {
+                ordersContext += `\n(Hay ${ordenesSinVerificar} orden(es) adicional(es) en el sistema que NO se muestran aquí porque el cliente aún no ha proporcionado su Número de Orden o PIN Rápido. Si el cliente pregunta por su equipo, pídele uno de esos datos.)`;
+            }
+            if (!ordersContext) {
+                ordersContext = 'No hay órdenes verificadas para este cliente.';
+            }
+
+            // Leer de forma dinámica el manual de entrenamiento en cada mensaje
+            let manualEntrenamiento = "";
+            const rutaEntrenamiento = path.join(__dirname, 'instrucciones_ia.txt');
+            if (fs.existsSync(rutaEntrenamiento)) {
+                try {
+                    manualEntrenamiento = fs.readFileSync(rutaEntrenamiento, 'utf-8');
+                } catch (errManual) {
+                    console.warn('⚠️ No se pudo leer el archivo de entrenamiento:', errManual.message);
+                }
+            }
+
+            // Obtener fecha y hora actual del sistema local
+            const opcionesFecha = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
+            const fechaActualStr = new Date().toLocaleString('es-ES', opcionesFecha);
+
+            const systemPrompt = `Eres "ElectroBot", el asistente virtual inteligente de "ElectroTaller", un taller especializado en reparación de equipos electrónicos, refrigeración y automotriz.
+Tu objetivo es responder de forma profesional, atenta, empática y muy concisa (máximo 2 o 3 párrafos cortos) a los clientes a través de WhatsApp.
+
+### Información de Tiempo Real del Servidor:
+- Fecha y hora actual del sistema: ${fechaActualStr}
+- Número de WhatsApp actual del cliente: ${senderPhoneNum}
+
+### Manual de Operaciones y Base de Conocimientos (Entrenamiento):
+${manualEntrenamiento || 'Establecer políticas predeterminadas de atención cordial y asistencia en fallas básicas de refrigeración.'}
+
+### Información de Conectividad Humana:
+- Opción de hablar con humano (técnico): ${allowHumanContact ? 'Habilitada' : 'Deshabilitada temporalmente'}
+  - Si el cliente solicita de manera explícita hablar con un técnico o un humano, responde de forma atenta que en breve un técnico humano del taller tomará el control del chat para atenderle directamente.
+- Opción de notificar a administradores fuera de horario: ${notifyAfterHours ? 'Habilitada' : 'Deshabilitada'}
+
+### Base de Datos de Reparaciones (En Tiempo Real):
+A continuación se listan las órdenes activas en el taller:
+${ordersContext || 'No hay órdenes registradas activas en este momento.'}
+
+### Regla Estricta de Privacidad y Seguridad:
+1. NUNCA reveles información de órdenes de trabajo (estado, equipo, presupuesto, saldo) si el cliente solo proporcionó su nombre. El nombre NO es un dato válido de autenticación.
+2. Los ÚNICOS datos válidos para consultar una orden son: el Número de Orden (ej. ORDEN-123), la Cédula del cliente, o el PIN Rápido.
+3. Si un cliente pregunta por su orden y en la base de datos ves que el Estado dice "[OCULTO POR SEGURIDAD]", significa que debes pedirle credenciales. NO INVENTES EL ESTADO. ESTÁ TOTALMENTE PROHIBIDO. Respóndele amablemente: "Por motivos de seguridad, para proteger tu privacidad necesito que me proporciones tu *Número de Orden* (ej. ORDEN-123), tu *Cédula* o tu *PIN Rápido* para poder brindarte los detalles."
+4. Si en tu lista de órdenes SÍ ves el estado normal (ej. "Listo para Entrega"), significa que el cliente ya proporcionó un dato válido y puedes brindarle toda la información sin dudar.
+5. Si el cliente te dice su nombre y pregunta por su equipo, NO le confirmes si existe o no una orden a su nombre. Pídele directamente su número de orden, cédula o PIN.
+
+### Instrucciones Críticas de Comportamiento:
+1. **Búsqueda e Identificación de Órdenes:**
+   - SOLO busca órdenes cuando el cliente proporcione su Número de Orden, Cédula o PIN Rápido. Si el cliente solo dice su nombre, NO busques ni confirmes la existencia de órdenes. Pídele uno de los tres datos válidos.
+   - Si encuentras solo UNA orden que coincida y el estado NO está oculto, explícale detalladamente su estado real, incluyendo presupuesto y saldo pendiente.
+   - Si encuentras MÚLTIPLES órdenes para la misma búsqueda, NO le des los detalles completos. Muéstrale una breve lista numerada y pregúntale de cuál desea saber el detalle.
+   - Si el cliente pregunta por el estado de su equipo sin proporcionar datos de autenticación, pídele que te comparta su *Número de Orden* (ej. ORDEN-123), su *Cédula* o su *PIN Rápido*. NUNCA le pidas su nombre como dato para buscar órdenes.
+2. **Estilo de Respuesta:**
+   - Sé muy natural, profesional y conciso.
+   - Si el mensaje actual del cliente contiene lenguaje ofensivo o insultos directos: debes responder ÚNICAMENTE con la palabra clave: [IGNORAR_MENSAJE].`;
+
+            // Obtener el modelo de Gemini pasando la instrucción de sistema de forma dinámica como lo exige el SDK
+            const model = genAI.getGenerativeModel({
+                model: geminiModelName,
+                systemInstruction: systemPrompt
+            });
+
+            // Inicializar historial de conversación si no existe
+            if (!chatHistories[sender]) {
+                chatHistories[sender] = [];
+            }
+
+            // ── Soporte Multimodal: Detectar y procesar notas de voz ───────────────────
+            const esAudio = msg.hasMedia && (msg.type === 'audio' || msg.type === 'ptt');
+            let audioPart = null;
+            let textoMensaje = msg.body || "";
+
+            if (esAudio) {
+                try {
+                    console.log(`🎙️ Recibiendo nota de voz de ${sender}...`);
+                    const media = await msg.downloadMedia();
+                    if (media && media.data) {
+                        audioPart = {
+                            inlineData: {
+                                data: media.data,
+                                mimeType: media.mimetype
+                            }
+                        };
+                        textoMensaje = "[Nota de voz enviada por el cliente]";
+                    }
+                } catch (errMedia) {
+                    console.error('❌ Error al descargar nota de voz:', errMedia.message);
+                }
+            }
+
+            // Crear el array temporal de contents que enviaremos a Gemini en esta llamada
+            const consultaContents = [...chatHistories[sender]];
+
+            if (esAudio && audioPart) {
+                consultaContents.push({
+                    role: 'user',
+                    parts: [
+                        { text: "El cliente te envió una nota de voz. Escúchala con mucha atención y respóndele basándote en tu base de conocimientos y en la base de datos de órdenes sincronizadas en tiempo real." },
+                        audioPart
+                    ]
+                });
+            } else {
+                consultaContents.push({
+                    role: 'user',
+                    parts: [{ text: textoMensaje }]
+                });
+            }
+
+            // Llamar a Gemini enviándole la consulta conversacional (e inlineData de audio si aplica)
+            const result = await model.generateContent({
+                contents: consultaContents,
+                generationConfig: {
+                    temperature: 0.7,
+                    maxOutputTokens: 2048,
+                }
+            });
+
+            let respuestaIA = result.response.text();
+            if (respuestaIA && respuestaIA.trim().length > 0) {
+                // Interceptar código de moderación de agresividad / lenguaje obsceno
+                if (respuestaIA.includes('[IGNORAR_MENSAJE]')) {
+                    console.log(`⚠️ Gemini determinó ignorar el mensaje de ${sender} debido a tono agresivo o lenguaje obsceno.`);
+                    return; // Salir sin contestar
+                }
+
+                // Verificar si hay alguna etiqueta de escalamiento
+                const tagsEscalamiento = ['[ESCALAR_AIRE]', '[ESCALAR_AUTO]', '[ESCALAR_GENERAL]'];
+                let etiquetaEncontrada = null;
+                for (const tag of tagsEscalamiento) {
+                    if (respuestaIA.includes(tag)) {
+                        etiquetaEncontrada = tag;
+                        respuestaIA = respuestaIA.replace(tag, '').trim();
+                        break; // Solo tomamos la primera que encuentre
+                    }
+                }
+
+                // Extraer la etiqueta [TEL:+507XXXXXXXX] con el número del cliente
+                let telefonoCliente = senderPhoneNum; // fallback al número resuelto por el sistema
+                const telMatch = respuestaIA.match(/\[TEL:(\+?\d{7,15})\]/);
+                if (telMatch) {
+                    telefonoCliente = telMatch[1];
+                    respuestaIA = respuestaIA.replace(telMatch[0], '').trim();
+                    console.log(`[ESCALAMIENTO] Número de teléfono del cliente extraído de etiqueta: ${telefonoCliente}`);
+                }
+
+                // Responder al cliente
+                if (respuestaIA) {
+                    await msg.reply(respuestaIA);
+                }
+
+                // Si se encontró una etiqueta de escalamiento, notificar a los admins
+                if (etiquetaEncontrada) {
+                    const adminMsg = `⚠️ *Solicitud de Atención Técnica*\n\n` +
+                                     `👤 *Cliente:* ${telefonoCliente}\n` +
+                                     `📝 *Pregunta del cliente:* ${textoMensaje}\n` +
+                                     `🤖 *Respuesta que dio el bot:* ${respuestaIA || '(Solo transfirió el chat)'}\n\n` +
+                                     `🏷️ *Etiqueta:* ${etiquetaEncontrada}\n\n` +
+                                     `📋 Comandos rápidos en los siguientes mensajes 👇`;
+                    
+                    let idsAEnviar = [];
+                    if (etiquetaEncontrada === '[ESCALAR_AIRE]' && adminAire.length > 0) {
+                        idsAEnviar = adminAire;
+                    } else if (etiquetaEncontrada === '[ESCALAR_AUTO]' && adminAuto.length > 0) {
+                        idsAEnviar = adminAuto;
+                    } else {
+                        idsAEnviar = adminIds;
+                    }
+                    
+                    // Si el arreglo asignado está vacío, enviar a los admins generales por defecto
+                    if (idsAEnviar.length === 0) {
+                        idsAEnviar = adminIds;
+                    }
+
+                    for (const id of idsAEnviar) {
+                        let formatId = id;
+                        if (!formatId.includes('@')) {
+                            formatId = `${formatId}@c.us`;
+                        }
+                        try {
+                            await clientInstance.sendMessage(formatId, adminMsg);
+                            // Enviar los 3 comandos como mensajes individuales para reenvío fácil
+                            await clientInstance.sendMessage(formatId, `tomar ${telefonoCliente}`);
+                            await clientInstance.sendMessage(formatId, `responder ${telefonoCliente} `);
+                            await clientInstance.sendMessage(formatId, `liberar ${telefonoCliente}`);
+                            console.log(`[ESCALAMIENTO] Mensaje enviado a administrador ${formatId}`);
+                        } catch (err) {
+                            console.error(`[ESCALAMIENTO] Error enviando a administrador ${formatId}:`, err.message);
+                        }
+                    }
+                }
+
+                // Registrar los turnos en formato de texto simplificado en el historial permanente
+                chatHistories[sender].push({ role: 'user', parts: [{ text: textoMensaje }] });
+                chatHistories[sender].push({ role: 'model', parts: [{ text: respuestaIA || 'Transferido a humano' }] });
+                
+                // Mantener los últimos 10 mensajes
+                if (chatHistories[sender].length > 10) {
+                    chatHistories[sender] = chatHistories[sender].slice(-10);
+                }
+                return; // Ya respondimos al cliente arriba
+            }
+        } catch (error) {
+            console.error('❌ Error en el motor de IA Gemini:', error.message);
+            // Si la IA falla por cuota, internet, etc., caemos directamente en el fallback tradicional
+        }
+    }
+
     // ── FALLBACK TRADICIONAL: Menú interactivo estructurado (si la IA no está configurada o falló) ──
     if (userStates[sender] && userStates[sender].state === 'WAITING_SELECTION') {
         const selectedIndex = parseInt(texto) - 1;
@@ -382,7 +820,7 @@ function registrarListenerMensajes(clientInstance, nombreLinea) {
                 return new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(monto || 0);
             };
             const saldo = (Number(orderEncontrada.budget) || 0) - (Number(orderEncontrada.downPayment) || 0);
-            const equipo = utils.obtenerDescripcionEquipo(orderEncontrada);
+            const equipo = obtenerDescripcionEquipo(orderEncontrada);
 
             let respuesta = `📄 *Orden:* ${orderEncontrada.id} - ${equipo}\n` +
                             `👤 *Cliente:* ${orderEncontrada.clientName}\n` +
@@ -409,11 +847,11 @@ function registrarListenerMensajes(clientInstance, nombreLinea) {
             return msg.reply('Por favor ingresa al menos 3 letras o números para realizar la búsqueda.');
         }
 
-        const orderIdBuscado = utils.normalizarTextoBusqueda(msg.body);
+        const orderIdBuscado = normalizarTextoBusqueda(msg.body);
         
         // Buscar la orden en la base de datos sincronizada comparando ID, cliente o equipo
         const ordenesEncontradas = dbOrders.filter(o => {
-            const matchId = utils.normalizarTextoBusqueda(o.id) === orderIdBuscado;
+            const matchId = normalizarTextoBusqueda(o.id) === orderIdBuscado;
             
             // Para búsquedas por nombre, exigimos que escriba nombre y apellido (que haya al menos un espacio en su texto),
             // a menos que escriba exactamente el nombre completo como está en la base de datos.
@@ -437,7 +875,7 @@ function registrarListenerMensajes(clientInstance, nombreLinea) {
             userStates[sender] = { state: 'WAITING_SELECTION', orders: ordenesEncontradas };
             let respuesta = 'Hemos encontrado varios equipos asociados a tu búsqueda. Por favor, responde con el *número* del equipo que deseas consultar:\n\n';
             ordenesEncontradas.forEach((order, index) => {
-                const equipo = utils.obtenerDescripcionEquipo(order);
+                const equipo = obtenerDescripcionEquipo(order);
                 respuesta += `${index + 1}️⃣ *Orden:* ${order.id} - ${equipo}\n`;
             });
             return msg.reply(respuesta.trim());
@@ -447,7 +885,7 @@ function registrarListenerMensajes(clientInstance, nombreLinea) {
                 return new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(monto || 0);
             };
             const saldo = (Number(orderEncontrada.budget) || 0) - (Number(orderEncontrada.downPayment) || 0);
-            const equipo = utils.obtenerDescripcionEquipo(orderEncontrada);
+            const equipo = obtenerDescripcionEquipo(orderEncontrada);
 
             let respuesta = `📄 *Orden:* ${orderEncontrada.id} - ${equipo}\n` +
                             `👤 *Cliente:* ${orderEncontrada.clientName}\n` +
