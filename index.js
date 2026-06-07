@@ -568,10 +568,17 @@ expressApp.get('/api/chats/active', async (req, res) => {
                         type: msg.type
                     }));
 
+                    let profilePicUrl = null;
+                    try {
+                        const contact = await chat.getContact();
+                        profilePicUrl = await contact.getProfilePicUrl();
+                    } catch (e) {}
+
                     chatsData.push({
                         id: chat.id._serialized,
                         name: chat.name || chat.id.user,
                         timestamp: chat.timestamp,
+                        profilePicUrl: profilePicUrl,
                         messages: messagesData
                     });
                 }
