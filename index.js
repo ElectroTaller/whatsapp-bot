@@ -137,14 +137,16 @@ function crearCliente(lineaNum) {
             clearTimeout(startupTimeout1);  // Cancelar watchdog de arranque
             clearTimeout(readyTimeout1);
             readyTimeout1 = setTimeout(() => {
-                console.warn(`⏱️ [LÍNEA 1] Timeout: El bot tardó demasiado en conectarse. Reiniciando...`);
+                console.warn(`⏱️ [LÍNEA 1] Timeout: El bot tardó demasiado en conectarse. La sesión podría estar corrupta. Limpiando caché y reiniciando...`);
+                limpiarCache(1);
                 reiniciarCliente(1);
             }, 120000);
         } else {
             clearTimeout(startupTimeout2);  // Cancelar watchdog de arranque
             clearTimeout(readyTimeout2);
             readyTimeout2 = setTimeout(() => {
-                console.warn(`⏱️ [LÍNEA 2] Timeout: El bot tardó demasiado en conectarse. Reiniciando...`);
+                console.warn(`⏱️ [LÍNEA 2] Timeout: El bot tardó demasiado en conectarse. La sesión podría estar corrupta. Limpiando caché y reiniciando...`);
+                limpiarCache(2);
                 reiniciarCliente(2);
             }, 120000);
         }
