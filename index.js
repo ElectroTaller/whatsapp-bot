@@ -45,7 +45,7 @@ let humanTakenOver = {}; // Chats bajo control humano: { [clientId]: true }
 // Variables faltantes que causaban errores
 const palabrasProhibidas = ['puta', 'mierda', 'cabron', 'estupido', 'pendejo', 'idiota'];
 const chatHistories = {};
-const adminIds = ['50762460158', '50762460158@c.us']; // Añade números administradores aquí
+let adminIds = ['50762460158', '50762460158@c.us']; // Añade números administradores aquí
 const adminAire = [];
 const adminAuto = [];
 
@@ -138,17 +138,19 @@ function crearCliente(lineaNum) {
             clearTimeout(readyTimeout1);
             readyTimeout1 = setTimeout(() => {
                 console.warn(`⏱️ [LÍNEA 1] Timeout: El bot tardó demasiado en conectarse. La sesión podría estar corrupta. Limpiando caché y reiniciando...`);
-                limpiarCache(1);
-                reiniciarCliente(1);
-            }, 120000);
+                // Destruir cliente PRIMERO para liberar locks de Chrome en Windows
+                if (client1) { try { client1.destroy(); } catch(e) {} client1 = null; isReady1 = false; }
+                setTimeout(() => { limpiarCache(1); reiniciarCliente(1); }, 3000);
+            }, 180000);
         } else {
             clearTimeout(startupTimeout2);  // Cancelar watchdog de arranque
             clearTimeout(readyTimeout2);
             readyTimeout2 = setTimeout(() => {
                 console.warn(`⏱️ [LÍNEA 2] Timeout: El bot tardó demasiado en conectarse. La sesión podría estar corrupta. Limpiando caché y reiniciando...`);
-                limpiarCache(2);
-                reiniciarCliente(2);
-            }, 120000);
+                // Destruir cliente PRIMERO para liberar locks de Chrome en Windows
+                if (client2) { try { client2.destroy(); } catch(e) {} client2 = null; isReady2 = false; }
+                setTimeout(() => { limpiarCache(2); reiniciarCliente(2); }, 3000);
+            }, 180000);
         }
     });
 
@@ -230,14 +232,28 @@ function crearCliente(lineaNum) {
 
 function limpiarCache(lineaNum) {
     const cachePath = path.join(__dirname, '.wwebjs_auth', `session-wft-line-${lineaNum}`);
-    if (fs.existsSync(cachePath)) {
+    if (!fs.existsSync(cachePath)) return;
+
+    // En Windows, Chrome puede tener los archivos bloqueados brevemente tras destroy().
+    // Reintentamos hasta 5 veces con un intervalo de 2s antes de rendirse.
+    let intentos = 0;
+    const maxIntentos = 5;
+    const intentarBorrar = () => {
+        intentos++;
         try {
             fs.rmSync(cachePath, { recursive: true, force: true });
-            console.log(`🧹 [LÍNEA ${lineaNum}] Caché de sesión eliminado.`);
+            console.log(`🧹 [LÍNEA ${lineaNum}] Caché de sesión eliminado (intento ${intentos}).`);
         } catch (e) {
-            console.warn(`[LÍNEA ${lineaNum}] No se pudo limpiar el caché automáticamente:`, e.message);
+            if (intentos < maxIntentos) {
+                console.warn(`[LÍNEA ${lineaNum}] Reintentando borrar caché (intento ${intentos}/${maxIntentos}):`, e.code);
+                setTimeout(intentarBorrar, 2000);
+            } else {
+                console.warn(`[LÍNEA ${lineaNum}] No se pudo limpiar el caché tras ${maxIntentos} intentos. Error: ${e.message}`);
+                console.warn(`[LÍNEA ${lineaNum}] 👉 Borra manualmente la carpeta: ${cachePath}`);
+            }
         }
-    }
+    };
+    intentarBorrar();
 }
 
 function reiniciarCliente(lineaNum, delay = 5000) {
@@ -277,11 +293,25 @@ expressApp.post('/config', (req, res) => {
             console.log(`⚙️ Configuración actualizada: Notificar fuera de horario = ${notifyAfterHours}`);
             updated = true;
         }
+        if (req.body.shopPhone !== undefined || req.body.shopPhone2 !== undefined) {
+            adminIds = [];
+            if (req.body.shopPhone) {
+                const p1 = req.body.shopPhone.replace(/\D/g, '');
+                if (p1) adminIds.push(p1, p1 + '@c.us');
+            }
+            if (req.body.shopPhone2) {
+                const p2 = req.body.shopPhone2.replace(/\D/g, '');
+                if (p2) adminIds.push(p2, p2 + '@c.us');
+            }
+            if (adminIds.length === 0) adminIds = ['50762460158', '50762460158@c.us'];
+            console.log(`⚙️ Admins actualizados:`, adminIds);
+            updated = true;
+        }
         
         if (updated) {
-            res.json({ success: true, config: { allowHumanContact, notifyAfterHours } });
+            res.json({ success: true, config: { allowHumanContact, notifyAfterHours, adminIds } });
         } else {
-            res.status(400).json({ success: false, error: 'Se requiere parámetro allowHumanContact o notifyAfterHours.' });
+            res.status(400).json({ success: false, error: 'Se requieren parámetros de configuración.' });
         }
     } else {
         res.status(400).json({ success: false, error: 'Cuerpo de solicitud inválido.' });
