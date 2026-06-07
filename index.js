@@ -554,11 +554,11 @@ expressApp.get('/api/chats/active', async (req, res) => {
                 const personalChats = allChats.filter(c => !c.isGroup);
                 personalChats.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
                 
-                const topChats = personalChats.slice(0, 5);
+                const topChats = personalChats.slice(0, 10);
                 const chatsData = [];
 
                 for (let chat of topChats) {
-                    const messages = await chat.fetchMessages({ limit: 5 });
+                    const messages = await chat.fetchMessages({ limit: 15 });
                     const messagesData = messages.map(msg => ({
                         id: msg.id._serialized,
                         body: msg.body,
