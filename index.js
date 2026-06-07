@@ -42,6 +42,13 @@ let dbOrders = [];
 let userStates = {};
 let humanTakenOver = {}; // Chats bajo control humano: { [clientId]: true }
 
+// Variables faltantes que causaban errores
+const palabrasProhibidas = ['puta', 'mierda', 'cabron', 'estupido', 'pendejo', 'idiota'];
+const chatHistories = {};
+const adminIds = ['50762460158', '50762460158@c.us']; // Añade números administradores aquí
+const adminAire = [];
+const adminAuto = [];
+
 // Rate Limiting por remitente
 const rateLimitMap = {};        // { senderId: [timestamp1, timestamp2, ...] }
 const RATE_LIMIT_MAX = 5;       // máximo mensajes permitidos
@@ -508,6 +515,103 @@ function registrarListenerMensajes(clientInstance, nombreLinea) {
     }); // fin client.on('message')
 } // fin registrarListenerMensajes
 
+// ─────────────────────────────────────────────────────────
+// ENDPOINTS PARA CHATS ACTIVOS Y MEDIA
+// ─────────────────────────────────────────────────────────
+
+expressApp.get('/api/chats/active', async (req, res) => {
+    // Validar API Key antes de procesar
+    const providedKey = req.headers['x-api-key'] || req.query.apiKey;
+    if (providedKey !== API_KEY) {
+        return res.status(401).json({ success: false, error: 'API key inválida o no proporcionada.' });
+    }
+
+    try {
+        const results = {};
+
+        // Función helper para procesar una línea
+        const procesarLinea = async (client, lineaNum, isReadyFlag) => {
+            if (!isReadyFlag || !client) return null;
+            try {
+                const allChats = await client.getChats();
+                const personalChats = allChats.filter(c => !c.isGroup);
+                personalChats.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+                
+                const topChats = personalChats.slice(0, 5);
+                const chatsData = [];
+
+                for (let chat of topChats) {
+                    const messages = await chat.fetchMessages({ limit: 5 });
+                    const messagesData = messages.map(msg => ({
+                        id: msg.id._serialized,
+                        body: msg.body,
+                        fromMe: msg.fromMe,
+                        timestamp: msg.timestamp,
+                        hasMedia: msg.hasMedia,
+                        type: msg.type
+                    }));
+
+                    chatsData.push({
+                        id: chat.id._serialized,
+                        name: chat.name || chat.id.user,
+                        timestamp: chat.timestamp,
+                        messages: messagesData
+                    });
+                }
+                return chatsData;
+            } catch (err) {
+                console.error(`Error obteniendo chats línea ${lineaNum}:`, err);
+                return null;
+            }
+        };
+
+        results.line1 = await procesarLinea(client1, 1, isReady1);
+        results.line2 = await procesarLinea(client2, 2, isReady2);
+
+        res.json({ success: true, data: results });
+    } catch (error) {
+        console.error('Error en /api/chats/active:', error);
+        res.status(500).json({ success: false, error: error.toString() });
+    }
+});
+
+expressApp.get('/api/chats/media/:line/:messageId', async (req, res) => {
+    const providedKey = req.headers['x-api-key'] || req.query.apiKey;
+    if (providedKey !== API_KEY) {
+        return res.status(401).json({ success: false, error: 'API key inválida o no proporcionada.' });
+    }
+
+    const line = parseInt(req.params.line);
+    const messageId = req.params.messageId;
+    const targetClient = line === 2 ? client2 : client1;
+    const isReady = line === 2 ? isReady2 : isReady1;
+
+    if (!isReady || !targetClient) {
+        return res.status(503).json({ success: false, error: 'El cliente no está listo.' });
+    }
+
+    try {
+        const msg = await targetClient.getMessageById(messageId);
+        if (!msg) {
+            return res.status(404).json({ success: false, error: 'Mensaje no encontrado.' });
+        }
+
+        if (!msg.hasMedia) {
+            return res.status(400).json({ success: false, error: 'El mensaje no tiene media.' });
+        }
+
+        const media = await msg.downloadMedia();
+        if (!media) {
+            return res.status(500).json({ success: false, error: 'No se pudo descargar la media.' });
+        }
+
+        res.json({ success: true, mimetype: media.mimetype, data: media.data });
+    } catch (error) {
+        console.error('Error obteniendo media:', error);
+        res.status(500).json({ success: false, error: error.toString() });
+    }
+});
+
 // Endpoint de la API para recibir los mensajes desde app.js (soporta parámetro opcional "line" 1 o 2)
 expressApp.post('/send', async (req, res) => {
     // Validar API Key antes de procesar
@@ -533,40 +637,41 @@ expressApp.post('/send', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Se requiere el número de teléfono (phone) y el mensaje (message).' });
         }
 
-        // Formatear el número (remover espacios, símbolos, etc.)
-        let formattedPhone = phone.replace(/\D/g, ''); 
-
-        // Si es un número de 10 dígitos (formato estándar de México sin código de país)
-        // se lo agregamos automáticamente para que WhatsApp lo reconozca.
-        let tryPhones = [];
-
-        if (formattedPhone.length === 10) {
-            // En México, WA a veces requiere '521' y otras veces '52' antes del número de 10 dígitos.
-            tryPhones.push(`521${formattedPhone}@c.us`);
-            tryPhones.push(`52${formattedPhone}@c.us`);
-        } else {
-            // Para números que ya traen el código o son diferentes
-            if (!formattedPhone.endsWith('@c.us')) {
-                formattedPhone = `${formattedPhone}@c.us`;
-            }
-            tryPhones.push(formattedPhone);
-        }
-
-        // Buscar el número válido entre las opciones en el cliente de la línea seleccionada
+        // Formatear el número o ID
         let validPhone = null;
-        for (let p of tryPhones) {
-            if (await targetClient.isRegisteredUser(p)) {
-                validPhone = p;
-                break;
+
+        if (phone.includes('@')) {
+            // Es un ID directo (ej. @c.us, @g.us, @lid). Intentamos usarlo directamente.
+            validPhone = phone;
+        } else {
+            // Formatear el número (remover espacios, símbolos, etc.)
+            let formattedPhone = phone.replace(/\D/g, ''); 
+            let tryPhones = [];
+
+            // Si es un número de 10 dígitos (formato estándar sin código de país)
+            if (formattedPhone.length === 10) {
+                // En México, WA a veces requiere '521' y otras veces '52'. En Panamá sería '507' pero son 8 dígitos.
+                tryPhones.push(`521${formattedPhone}@c.us`);
+                tryPhones.push(`52${formattedPhone}@c.us`);
+            } else {
+                tryPhones.push(`${formattedPhone}@c.us`);
+            }
+
+            // Buscar el número válido entre las opciones en el cliente
+            for (let p of tryPhones) {
+                if (await targetClient.isRegisteredUser(p)) {
+                    validPhone = p;
+                    break;
+                }
             }
         }
 
         if (!validPhone) {
-            console.log(`❌ [LÍNEA ${selectedLine}] Número no registrado en WA: ${phone}`);
+            console.log(`❌ [LÍNEA ${selectedLine}] Número no registrado en WA o ID inválido: ${phone}`);
             return res.status(400).json({ success: false, error: 'El número de teléfono no parece estar registrado en WhatsApp.' });
         }
 
-        formattedPhone = validPhone;
+        let formattedPhone = validPhone;
 
         // Enviar el mensaje por el cliente correspondiente
         const response = await targetClient.sendMessage(formattedPhone, message);

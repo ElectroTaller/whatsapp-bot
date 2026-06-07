@@ -13,8 +13,8 @@ echo.
 "C:\Program Files\nodejs\node.exe" "%~dp0index.js"
 if %errorlevel% neq 0 (
     echo.
-    echo [ERROR] El bot se cerro con error. Reiniciando en 5 segundos...
-    timeout /t 5 /nobreak >nul
+    echo [ERROR] El bot se cerro con error. Revisa el texto arriba para encontrar el problema.
+    pause
     goto :EOF
 )
 pause

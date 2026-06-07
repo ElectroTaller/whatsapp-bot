@@ -221,7 +221,7 @@ module.exports = {
                     // Interceptar código de moderación de agresividad / lenguaje obsceno
                     if (respuestaIA.includes('[IGNORAR_MENSAJE]')) {
                         console.log(`⚠️ Gemini determinó ignorar el mensaje de ${sender} debido a tono agresivo o lenguaje obsceno.`);
-                        return; // Salir sin contestar
+                        return true; // Ya lo manejamos (ignorándolo), evitamos el fallback
                     }
     
                     // Verificar si hay alguna etiqueta de escalamiento
@@ -298,13 +298,14 @@ module.exports = {
                     if (chatHistories[sender].length > 10) {
                         chatHistories[sender] = chatHistories[sender].slice(-10);
                     }
-                    return; // Ya respondimos al cliente arriba
+                    return true; // Indicamos que la IA manejó el mensaje con éxito (evita el fallback)
                 }
             } catch (error) {
                 console.error('❌ Error en el motor de IA Gemini:', error.message);
                 // Si la IA falla por cuota, internet, etc., caemos directamente en el fallback tradicional
+                return false;
             }
-            return true;
+            return false; // Si la IA no genera respuesta, pasamos al fallback
 
     }
 };
