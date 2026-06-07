@@ -235,28 +235,45 @@ module.exports = {
                         }
                     }
     
-                    // Extraer la etiqueta [TEL:+507XXXXXXXX] con el número del cliente
+                    // Extraer la etiqueta [TEL:...] con el número del cliente
                     let telefonoCliente = senderPhoneNum; // fallback al número resuelto por el sistema
-                    const telMatch = respuestaIA.match(/\[TEL:(\+?\d{7,15})\]/);
+                    const telMatch = respuestaIA.match(/\[TEL:(.*?)\]/i);
                     if (telMatch) {
-                        telefonoCliente = telMatch[1];
+                        telefonoCliente = telMatch[1].trim();
                         respuestaIA = respuestaIA.replace(telMatch[0], '').trim();
-                        console.log(`[ESCALAMIENTO] Número de teléfono del cliente extraído de etiqueta: ${telefonoCliente}`);
+                        console.log(`[ESCALAMIENTO] Teléfono extraído: ${telefonoCliente}`);
+                    }
+
+                    // Extraer [NOMBRE:...]
+                    let nombreCliente = "No proporcionado";
+                    const nombreMatch = respuestaIA.match(/\[NOMBRE:(.*?)\]/i);
+                    if (nombreMatch) {
+                        nombreCliente = nombreMatch[1].trim();
+                        respuestaIA = respuestaIA.replace(nombreMatch[0], '').trim();
+                    }
+
+                    // Extraer [SERVICIO:...]
+                    let servicioCliente = "No especificado";
+                    const servicioMatch = respuestaIA.match(/\[SERVICIO:(.*?)\]/i);
+                    if (servicioMatch) {
+                        servicioCliente = servicioMatch[1].trim();
+                        respuestaIA = respuestaIA.replace(servicioMatch[0], '').trim();
                     }
     
-                    // Responder al cliente
+                    // Responder al cliente (solo con la respuesta limpia, sin etiquetas)
                     if (respuestaIA) {
                         await msg.reply(respuestaIA);
                     }
     
-                    // Si se encontró una etiqueta de escalamiento, notificar a los admins
+                    // Si se encontró una etiqueta de escalamiento, enviar la ficha a los admins
                     if (etiquetaEncontrada) {
                         const adminMsg = `⚠️ *Solicitud de Atención Técnica*\n\n` +
-                                         `👤 *Cliente:* ${telefonoCliente}\n` +
-                                         `📝 *Pregunta del cliente:* ${textoMensaje}\n` +
-                                         `🤖 *Respuesta que dio el bot:* ${respuestaIA || '(Solo transfirió el chat)'}\n\n` +
+                                         `👤 *Cliente:* ${nombreCliente}\n` +
+                                         `📞 *Teléfono:* ${telefonoCliente}\n` +
+                                         `🛠️ *Servicio requerido:* ${servicioCliente}\n\n` +
+                                         `🤖 *Última respuesta del bot:* ${respuestaIA || '(Transfirió el chat)'}\n\n` +
                                          `🏷️ *Etiqueta:* ${etiquetaEncontrada}\n\n` +
-                                         `📋 Comandos rápidos en los siguientes mensajes 👇`;
+                                         `📋 Comandos rápidos 👇`;
                         
                         let idsAEnviar = [];
                         if (etiquetaEncontrada === '[ESCALAR_AIRE]' && adminAire.length > 0) {

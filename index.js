@@ -45,7 +45,8 @@ let humanTakenOver = {}; // Chats bajo control humano: { [clientId]: true }
 // Variables faltantes que causaban errores
 const palabrasProhibidas = ['puta', 'mierda', 'cabron', 'estupido', 'pendejo', 'idiota'];
 const chatHistories = {};
-let adminIds = ['50762460158', '50762460158@c.us']; // Añade números administradores aquí
+let adminIdsL1 = ['50766219681', '50766219681@c.us'];
+let adminIdsL2 = ['50766231561', '50766231561@c.us'];
 const adminAire = [];
 const adminAuto = [];
 
@@ -65,7 +66,8 @@ let reconnectTimer1 = null;
 let reconnectTimer2 = null;
 let startupTimeout1 = null;  // Watchdog: reinicia si initialize() se queda colgado sin respuesta
 let startupTimeout2 = null;
-let linea2Iniciada = false;  // Control para iniciar la Línea 2 solo tras arrancar la Línea 1
+let failCount1 = 0;
+let failCount2 = 0;
 
 // ─────────────────────────────────────────────────────────
 // FUNCIÓN DE CREACIÓN DEL CLIENTE (parametrizada para multilínea)
@@ -137,19 +139,37 @@ function crearCliente(lineaNum) {
             clearTimeout(startupTimeout1);  // Cancelar watchdog de arranque
             clearTimeout(readyTimeout1);
             readyTimeout1 = setTimeout(() => {
-                console.warn(`⏱️ [LÍNEA 1] Timeout: El bot tardó demasiado en conectarse. La sesión podría estar corrupta. Limpiando caché y reiniciando...`);
+                failCount1++;
+                console.warn(`⏱️ [LÍNEA 1] Timeout (Intento ${failCount1}/5): El bot tardó demasiado en conectarse.`);
+                
                 // Destruir cliente PRIMERO para liberar locks de Chrome en Windows
                 if (client1) { try { client1.destroy(); } catch(e) {} client1 = null; isReady1 = false; }
-                setTimeout(() => { limpiarCache(1); reiniciarCliente(1); }, 3000);
+
+                if (failCount1 >= 5) {
+                    console.warn(`🛑 [LÍNEA 1] 5 intentos fallidos consecutivos. La sesión podría estar corrupta. Limpiando caché...`);
+                    setTimeout(() => { failCount1 = 0; limpiarCache(1); reiniciarCliente(1); }, 3000);
+                } else {
+                    console.log(`🔄 [LÍNEA 1] Reintentando conexión sin borrar datos (Intento ${failCount1 + 1})...`);
+                    setTimeout(() => { reiniciarCliente(1); }, 3000);
+                }
             }, 180000);
         } else {
             clearTimeout(startupTimeout2);  // Cancelar watchdog de arranque
             clearTimeout(readyTimeout2);
             readyTimeout2 = setTimeout(() => {
-                console.warn(`⏱️ [LÍNEA 2] Timeout: El bot tardó demasiado en conectarse. La sesión podría estar corrupta. Limpiando caché y reiniciando...`);
+                failCount2++;
+                console.warn(`⏱️ [LÍNEA 2] Timeout (Intento ${failCount2}/5): El bot tardó demasiado en conectarse.`);
+                
                 // Destruir cliente PRIMERO para liberar locks de Chrome en Windows
                 if (client2) { try { client2.destroy(); } catch(e) {} client2 = null; isReady2 = false; }
-                setTimeout(() => { limpiarCache(2); reiniciarCliente(2); }, 3000);
+                
+                if (failCount2 >= 5) {
+                    console.warn(`🛑 [LÍNEA 2] 5 intentos fallidos consecutivos. La sesión podría estar corrupta. Limpiando caché...`);
+                    setTimeout(() => { failCount2 = 0; limpiarCache(2); reiniciarCliente(2); }, 3000);
+                } else {
+                    console.log(`🔄 [LÍNEA 2] Reintentando conexión sin borrar datos (Intento ${failCount2 + 1})...`);
+                    setTimeout(() => { reiniciarCliente(2); }, 3000);
+                }
             }, 180000);
         }
     });
@@ -159,13 +179,7 @@ function crearCliente(lineaNum) {
             clearTimeout(readyTimeout1);
             isReady1 = true;
             startupReady1 = false;
-            
-            // Iniciar Línea 2 SOLO cuando Línea 1 esté 100% lista para evitar saturar recursos
-            if (!linea2Iniciada) {
-                linea2Iniciada = true;
-                console.log('🔄 [LÍNEA 2] La Línea 1 está lista. Iniciando Línea 2 de forma segura...');
-                setTimeout(() => crearCliente(2), 3000); // Pequeña pausa antes de abrir otro Chrome
-            }
+            failCount1 = 0; // Se reinicia el contador de fallos
             
             setTimeout(() => {
                 startupReady1 = true;
@@ -175,6 +189,7 @@ function crearCliente(lineaNum) {
             clearTimeout(readyTimeout2);
             isReady2 = true;
             startupReady2 = false;
+            failCount2 = 0; // Se reinicia el contador de fallos
             setTimeout(() => {
                 startupReady2 = true;
                 console.log('✅ [LÍNEA 2] Periodo de gracia finalizado. Bot procesando mensajes.');
@@ -294,22 +309,24 @@ expressApp.post('/config', (req, res) => {
             updated = true;
         }
         if (req.body.shopPhone !== undefined || req.body.shopPhone2 !== undefined) {
-            adminIds = [];
             if (req.body.shopPhone) {
                 const p1 = req.body.shopPhone.replace(/\D/g, '');
-                if (p1) adminIds.push(p1, p1 + '@c.us');
+                if (p1) adminIdsL1 = [p1, p1 + '@c.us'];
+            } else {
+                adminIdsL1 = ['50766219681', '50766219681@c.us'];
             }
             if (req.body.shopPhone2) {
                 const p2 = req.body.shopPhone2.replace(/\D/g, '');
-                if (p2) adminIds.push(p2, p2 + '@c.us');
+                if (p2) adminIdsL2 = [p2, p2 + '@c.us'];
+            } else {
+                adminIdsL2 = ['50766231561', '50766231561@c.us'];
             }
-            if (adminIds.length === 0) adminIds = ['50762460158', '50762460158@c.us'];
-            console.log(`⚙️ Admins actualizados:`, adminIds);
+            console.log(`⚙️ Admins actualizados - L1:`, adminIdsL1, `L2:`, adminIdsL2);
             updated = true;
         }
         
         if (updated) {
-            res.json({ success: true, config: { allowHumanContact, notifyAfterHours, adminIds } });
+            res.json({ success: true, config: { allowHumanContact, notifyAfterHours, adminIdsL1, adminIdsL2 } });
         } else {
             res.status(400).json({ success: false, error: 'Se requieren parámetros de configuración.' });
         }
@@ -332,6 +349,27 @@ expressApp.post('/sync-orders', (req, res) => {
 // Función para normalizar texto de búsqueda de órdenes (elimina prefijos comunes, guiones y espacios)
 // 🤖 CEREBRO DEL BOT: función que registra el listener de mensajes (se llama cada vez que el cliente se crea)
 function registrarListenerMensajes(clientInstance, nombreLinea) {
+    // ── Listener para comandos directos en el chat (mensajes enviados por el administrador/Host) ──
+    clientInstance.on('message_create', async msg => {
+        if (!msg.fromMe) return; // Solo nos interesan los mensajes que enviamos NOSOTROS (Host)
+        
+        const texto = (msg.body || '').trim().toLowerCase();
+        if (texto.startsWith('/')) {
+            // Es un comando directo en el chat del cliente
+            const sender = msg.to; // En fromMe, el destino (msg.to) es el ID del chat actual
+            const commands = require('./bot/commands.js'); // Asegurar acceso a los comandos
+            const handled = await commands.handleHostCommands(msg, clientInstance, texto, sender, humanTakenOver, nombreLinea);
+            if (handled) {
+                // Opcional: Borrar el comando para que el cliente no lo vea
+                try {
+                    await msg.delete(true); // true = eliminar para todos
+                } catch (e) {
+                    console.warn(`[Host Command] No se pudo borrar el mensaje: ${e.message}`);
+                }
+            }
+        }
+    });
+
     clientInstance.on('message', async msg => {
     // ── Capa -2: Ignorar mensajes propios del bot ──────────────────────────────
     if (msg.fromMe) return;
@@ -359,6 +397,18 @@ function registrarListenerMensajes(clientInstance, nombreLinea) {
     }
     if (msg.from.includes('@g.us')) {
         return; // Ignorar mensajes de grupos
+    }
+
+    // ── Capa 0.1: Filtro estricto de Tipo de Mensaje (Ignorar eventos del sistema) ──
+    const tiposValidos = ['chat', 'audio', 'ptt', 'image', 'video', 'document', 'sticker', 'vcard', 'location'];
+    if (!tiposValidos.includes(msg.type)) {
+        console.log(`[${nombreLinea}] Ignorando mensaje automático del sistema (tipo: ${msg.type})`);
+        return;
+    }
+
+    // ── Capa 0.2: Descartar mensajes vacíos (sin texto y sin archivo adjunto) ──
+    if (!msg.body && !msg.hasMedia) {
+        return;
     }
 
     const texto = msg.body.trim().toLowerCase();
@@ -420,10 +470,13 @@ function registrarListenerMensajes(clientInstance, nombreLinea) {
         contactNum = sender.split('@')[0].replace(/\D/g, '');
     }
 
-    const isFromAdmin = adminIds.includes(sender) || adminIds.includes(contactNum) || adminIds.includes(msg.author || '');
+    const isFromAdmin = adminIdsL1.includes(sender) || adminIdsL1.includes(contactNum) || adminIdsL1.includes(msg.author || '') ||
+                        adminIdsL2.includes(sender) || adminIdsL2.includes(contactNum) || adminIdsL2.includes(msg.author || '');
+
+    const currentAdmins = nombreLinea === 'Línea 1' ? adminIdsL1 : adminIdsL2;
 
     if (isFromAdmin) {
-        const handled = await commands.handleAdminCommands(msg, clientInstance, texto, sender, contactNum, humanTakenOver, adminIds, adminAire, adminAuto);
+        const handled = await commands.handleAdminCommands(msg, clientInstance, texto, sender, contactNum, humanTakenOver, currentAdmins, adminAire, adminAuto);
         if (handled !== false) return;
     }
     // ── Verificar si el chat está bajo control humano (bot pausado) ────────────────
@@ -434,7 +487,7 @@ function registrarListenerMensajes(clientInstance, nombreLinea) {
 
     // ── Opcional: Si Gemini está activo y configurado, procesar con IA ─────────────────
     // ── Opcional: Si Gemini está activo y configurado, procesar con IA ─────────────────
-    const iaHandled = await aiGemini.procesarMensaje(msg, clientInstance, texto, sender, contactNum, dbOrders, chatHistories, allowHumanContact, notifyAfterHours, adminIds, adminAire, adminAuto);
+    const iaHandled = await aiGemini.procesarMensaje(msg, clientInstance, texto, sender, contactNum, dbOrders, chatHistories, allowHumanContact, notifyAfterHours, currentAdmins, adminAire, adminAuto);
     if (iaHandled) return;
     // ── FALLBACK TRADICIONAL: Menú interactivo estructurado (si la IA no está configurada o falló) ──
     if (userStates[sender] && userStates[sender].state === 'WAITING_SELECTION') {
@@ -599,7 +652,13 @@ expressApp.get('/api/chats/active', async (req, res) => {
                 const chatsData = [];
 
                 for (let chat of topChats) {
-                    const messages = await chat.fetchMessages({ limit: 15 });
+                    let messages = [];
+                    try {
+                        messages = await chat.fetchMessages({ limit: 15 });
+                    } catch (e) {
+                        console.warn(`[LÍNEA ${lineaNum}] Error obteniendo mensajes del chat ${chat.id.user}:`, e.message);
+                    }
+
                     const messagesData = messages.map(msg => ({
                         id: msg.id._serialized,
                         body: msg.body,
@@ -756,6 +815,6 @@ expressApp.listen(port, () => {
     console.log(`🚀 Servidor API del Bot escuchando en http://localhost:${port}`);
 });
 
-// Iniciar el sistema: la Línea 2 se iniciará automáticamente mediante eventos 
-// cuando la Línea 1 haya terminado de cargar completamente.
+// Iniciar el sistema: arrancar ambas líneas en paralelo para mayor velocidad
 crearCliente(1);
+crearCliente(2);
