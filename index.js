@@ -63,6 +63,8 @@ let readyTimeout1 = null;
 let readyTimeout2 = null;
 let reconnectTimer1 = null;
 let reconnectTimer2 = null;
+let startupTimeout1 = null;  // Watchdog: reinicia si initialize() se queda colgado sin respuesta
+let startupTimeout2 = null;
 
 // ─────────────────────────────────────────────────────────
 // FUNCIÓN DE CREACIÓN DEL CLIENTE (parametrizada para multilínea)
@@ -105,7 +107,7 @@ function crearCliente(lineaNum) {
                 '--disable-background-timer-throttling',
                 '--window-size=800,600'
             ],
-            timeout: 60000  // 60 segundos para abrir navegador
+            timeout: 120000  // 120 segundos para abrir navegador (dos instancias necesitan más tiempo)
         }
     });
 
@@ -117,8 +119,9 @@ function crearCliente(lineaNum) {
 
     // ── Eventos del ciclo de vida ──────────────────────────
     clientInstance.on('qr', (qr) => {
-        if (lineaNum === 1) clearTimeout(readyTimeout1);
-        else clearTimeout(readyTimeout2);
+        // El QR llegó: Chrome y WA Web funcionan, cancelar watchdog de arranque
+        if (lineaNum === 1) { clearTimeout(readyTimeout1); clearTimeout(startupTimeout1); }
+        else { clearTimeout(readyTimeout2); clearTimeout(startupTimeout2); }
 
         console.log('\n----------------------------------------------------');
         console.log(`📱 ESCANEA EL QR PARA VINCULAR LA [LÍNEA ${lineaNum}] 📱`);
@@ -130,17 +133,19 @@ function crearCliente(lineaNum) {
         console.log(`✅ [LÍNEA ${lineaNum}] Autenticación exitosa. Cargando WhatsApp...`);
         
         if (lineaNum === 1) {
+            clearTimeout(startupTimeout1);  // Cancelar watchdog de arranque
             clearTimeout(readyTimeout1);
             readyTimeout1 = setTimeout(() => {
                 console.warn(`⏱️ [LÍNEA 1] Timeout: El bot tardó demasiado en conectarse. Reiniciando...`);
                 reiniciarCliente(1);
-            }, 60000);
+            }, 120000);
         } else {
+            clearTimeout(startupTimeout2);  // Cancelar watchdog de arranque
             clearTimeout(readyTimeout2);
             readyTimeout2 = setTimeout(() => {
                 console.warn(`⏱️ [LÍNEA 2] Timeout: El bot tardó demasiado en conectarse. Reiniciando...`);
                 reiniciarCliente(2);
-            }, 60000);
+            }, 120000);
         }
     });
 
@@ -167,10 +172,10 @@ function crearCliente(lineaNum) {
 
     clientInstance.on('auth_failure', (msg) => {
         if (lineaNum === 1) {
-            clearTimeout(readyTimeout1);
+            clearTimeout(startupTimeout1); clearTimeout(readyTimeout1);
             isReady1 = false;
         } else {
-            clearTimeout(readyTimeout2);
+            clearTimeout(startupTimeout2); clearTimeout(readyTimeout2);
             isReady2 = false;
         }
         console.error(`❌ [LÍNEA ${lineaNum}] Fallo de autenticación:`, msg);
@@ -181,10 +186,10 @@ function crearCliente(lineaNum) {
 
     clientInstance.on('disconnected', (reason) => {
         if (lineaNum === 1) {
-            clearTimeout(readyTimeout1);
+            clearTimeout(startupTimeout1); clearTimeout(readyTimeout1);
             isReady1 = false;
         } else {
-            clearTimeout(readyTimeout2);
+            clearTimeout(startupTimeout2); clearTimeout(readyTimeout2);
             isReady2 = false;
         }
         console.log(`⚠️ [LÍNEA ${lineaNum}] Desconectado: ${reason}. Reconectando en 10 segundos...`);
@@ -194,8 +199,20 @@ function crearCliente(lineaNum) {
     // Registrar listeners de mensajes para esta instancia
     registrarListenerMensajes(clientInstance, `Línea ${lineaNum}`);
 
+    // ── Watchdog de arranque en frío ────────────────────────────────────────────
+    // Si en 90s no llega ningún evento (qr, authenticated, auth_failure),
+    // es que Chrome/WA Web se colgó silenciosamente → forzar reconexión.
+    const startupWatchdog = setTimeout(() => {
+        console.warn(`⏱️ [LÍNEA ${lineaNum}] Watchdog: sin respuesta de WhatsApp Web tras 90s. Reiniciando...`);
+        reiniciarCliente(lineaNum, 5000);
+    }, 90000);
+    if (lineaNum === 1) startupTimeout1 = startupWatchdog;
+    else startupTimeout2 = startupWatchdog;
+
     clientInstance.initialize().catch(err => {
         console.error(`❌ [LÍNEA ${lineaNum}] Error al inicializar:`, err.message);
+        if (lineaNum === 1) clearTimeout(startupTimeout1);
+        else clearTimeout(startupTimeout2);
         reiniciarCliente(lineaNum, 10000);
     });
 }
@@ -691,6 +708,10 @@ expressApp.listen(port, () => {
     console.log(`🚀 Servidor API del Bot escuchando en http://localhost:${port}`);
 });
 
-// Iniciar ambos clientes de WhatsApp en paralelo con almacenamiento persistente independiente
+// Iniciar clientes de WhatsApp de forma ESCALONADA para evitar saturar Chrome
+// La Línea 2 espera 20 segundos para que la Línea 1 ya haya lanzado su navegador
 crearCliente(1);
-crearCliente(2);
+setTimeout(() => {
+    console.log('🔄 [LÍNEA 2] Iniciando con retraso escalonado para evitar conflictos de Chrome...');
+    crearCliente(2);
+}, 20000); // 20 segundos de espera
