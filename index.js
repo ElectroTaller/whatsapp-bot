@@ -65,6 +65,7 @@ let reconnectTimer1 = null;
 let reconnectTimer2 = null;
 let startupTimeout1 = null;  // Watchdog: reinicia si initialize() se queda colgado sin respuesta
 let startupTimeout2 = null;
+let linea2Iniciada = false;  // Control para iniciar la Línea 2 solo tras arrancar la Línea 1
 
 // ─────────────────────────────────────────────────────────
 // FUNCIÓN DE CREACIÓN DEL CLIENTE (parametrizada para multilínea)
@@ -154,6 +155,14 @@ function crearCliente(lineaNum) {
             clearTimeout(readyTimeout1);
             isReady1 = true;
             startupReady1 = false;
+            
+            // Iniciar Línea 2 SOLO cuando Línea 1 esté 100% lista para evitar saturar recursos
+            if (!linea2Iniciada) {
+                linea2Iniciada = true;
+                console.log('🔄 [LÍNEA 2] La Línea 1 está lista. Iniciando Línea 2 de forma segura...');
+                setTimeout(() => crearCliente(2), 3000); // Pequeña pausa antes de abrir otro Chrome
+            }
+            
             setTimeout(() => {
                 startupReady1 = true;
                 console.log('✅ [LÍNEA 1] Periodo de gracia finalizado. Bot procesando mensajes.');
@@ -715,10 +724,6 @@ expressApp.listen(port, () => {
     console.log(`🚀 Servidor API del Bot escuchando en http://localhost:${port}`);
 });
 
-// Iniciar clientes de WhatsApp de forma ESCALONADA para evitar saturar Chrome
-// La Línea 2 espera 20 segundos para que la Línea 1 ya haya lanzado su navegador
+// Iniciar el sistema: la Línea 2 se iniciará automáticamente mediante eventos 
+// cuando la Línea 1 haya terminado de cargar completamente.
 crearCliente(1);
-setTimeout(() => {
-    console.log('🔄 [LÍNEA 2] Iniciando con retraso escalonado para evitar conflictos de Chrome...');
-    crearCliente(2);
-}, 20000); // 20 segundos de espera
